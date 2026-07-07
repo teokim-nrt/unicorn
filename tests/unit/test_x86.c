@@ -1043,6 +1043,197 @@ static void test_x86_cmpxchg(void)
     OK(uc_close(uc));
 }
 
+static void test_x86_cmpxchg32_acc_case(uint64_t initial_rax,
+                                        uint64_t initial_mem,
+                                        uint64_t expected_rax,
+                                        uint64_t expected_mem,
+                                        bool expected_zf)
+{
+    uc_engine *uc;
+    char code[] = "\x41\x0f\xb1\x18"; /* cmpxchg dword ptr [r8], ebx */
+    uint64_t data_address = 0x2000000;
+    uint64_t rax = initial_rax;
+    uint64_t rbx = 0;
+    uint64_t r8 = data_address;
+    uint64_t rflags;
+    uint64_t mem;
+
+    uc_common_setup(&uc, UC_ARCH_X86, UC_MODE_64, code, sizeof(code) - 1);
+    OK(uc_mem_map(uc, data_address, 0x1000, UC_PROT_ALL));
+    OK(uc_mem_write(uc, data_address, &initial_mem, sizeof(initial_mem)));
+    OK(uc_reg_write(uc, UC_X86_REG_R8, &r8));
+    OK(uc_reg_write(uc, UC_X86_REG_RAX, &rax));
+    OK(uc_reg_write(uc, UC_X86_REG_RBX, &rbx));
+
+    OK(uc_emu_start(uc, code_start, code_start + sizeof(code) - 1, 0, 0));
+    OK(uc_reg_read(uc, UC_X86_REG_RAX, &rax));
+    OK(uc_reg_read(uc, UC_X86_REG_RFLAGS, &rflags));
+    OK(uc_mem_read(uc, data_address, &mem, sizeof(mem)));
+
+    TEST_CHECK(rax == expected_rax);
+    TEST_CHECK(mem == expected_mem);
+    TEST_CHECK((bool)(rflags & 0x40) == expected_zf);
+
+    OK(uc_close(uc));
+}
+
+static void test_x86_cmpxchg32_accumulator(void)
+{
+    test_x86_cmpxchg32_acc_case(0xffffffffffffffffULL,
+                                0xffffffffffffffffULL,
+                                0xffffffffffffffffULL,
+                                0xffffffff00000000ULL, true);
+    test_x86_cmpxchg32_acc_case(0xffffffff00000000ULL,
+                                0xffffffffffffffffULL,
+                                0x00000000ffffffffULL,
+                                0xffffffffffffffffULL, false);
+}
+
+static void test_x86_cmpxchg32_reg_case(uint64_t initial_rax,
+                                        uint64_t initial_rcx,
+                                        uint64_t initial_rbx,
+                                        uint64_t expected_rax,
+                                        uint64_t expected_rcx,
+                                        bool expected_zf)
+{
+    uc_engine *uc;
+    char code[] = "\x0f\xb1\xd9"; /* cmpxchg ecx, ebx */
+    uint64_t rax = initial_rax;
+    uint64_t rcx = initial_rcx;
+    uint64_t rbx = initial_rbx;
+    uint64_t rflags;
+
+    uc_common_setup(&uc, UC_ARCH_X86, UC_MODE_64, code, sizeof(code) - 1);
+    OK(uc_reg_write(uc, UC_X86_REG_RAX, &rax));
+    OK(uc_reg_write(uc, UC_X86_REG_RCX, &rcx));
+    OK(uc_reg_write(uc, UC_X86_REG_RBX, &rbx));
+
+    OK(uc_emu_start(uc, code_start, code_start + sizeof(code) - 1, 0, 0));
+    OK(uc_reg_read(uc, UC_X86_REG_RAX, &rax));
+    OK(uc_reg_read(uc, UC_X86_REG_RCX, &rcx));
+    OK(uc_reg_read(uc, UC_X86_REG_RFLAGS, &rflags));
+
+    TEST_CHECK(rax == expected_rax);
+    TEST_CHECK(rcx == expected_rcx);
+    TEST_CHECK((bool)(rflags & 0x40) == expected_zf);
+
+    OK(uc_close(uc));
+}
+
+static void test_x86_cmpxchg32_register(void)
+{
+    test_x86_cmpxchg32_reg_case(0xeeeeeeeeffffffffULL,
+                                0xaaaaaaaaffffffffULL,
+                                0x1111111122222222ULL,
+                                0xeeeeeeeeffffffffULL,
+                                0x0000000022222222ULL, true);
+    test_x86_cmpxchg32_reg_case(0x1111111112345678ULL,
+                                0xaaaaaaaaffffffffULL,
+                                0x1111111122222222ULL,
+                                0x00000000ffffffffULL,
+                                0xaaaaaaaaffffffffULL, false);
+}
+
+static void test_x86_ret_imm16_unsigned(void)
+{
+    uc_engine *uc;
+    char code[] = "\xc2\x00\xff"; /* ret 0xff00 */
+    uint64_t stack_address = 0x2000000;
+    uint64_t return_address = code_start + sizeof(code) - 1;
+    uint64_t rsp = stack_address;
+
+    uc_common_setup(&uc, UC_ARCH_X86, UC_MODE_64, code, sizeof(code) - 1);
+    OK(uc_mem_map(uc, stack_address, 0x1000, UC_PROT_ALL));
+    OK(uc_mem_write(uc, stack_address, &return_address,
+                    sizeof(return_address)));
+    OK(uc_reg_write(uc, UC_X86_REG_RSP, &rsp));
+
+    OK(uc_emu_start(uc, code_start, return_address, 0, 1));
+    OK(uc_reg_read(uc, UC_X86_REG_RSP, &rsp));
+
+    TEST_CHECK(rsp == stack_address + 8 + 0xff00);
+
+    OK(uc_close(uc));
+}
+
+static void test_x86_rorx_rip_relative_imm(void)
+{
+    uc_engine *uc;
+    char code[] = "\xc4\xe3\x7b\xf0\x05\xf6\x14\x00\x00\x00";
+    uint64_t expected_address = code_start + sizeof(code) - 1 + 0x14f6;
+    uint8_t data[] = {0xaa, 0x11, 0x22, 0x33, 0x44};
+    uint64_t rax;
+
+    uc_common_setup(&uc, UC_ARCH_X86, UC_MODE_64, code, sizeof(code) - 1);
+    OK(uc_mem_write(uc, expected_address - 1, data, sizeof(data)));
+
+    OK(uc_emu_start(uc, code_start, code_start + sizeof(code) - 1, 0, 1));
+    OK(uc_reg_read(uc, UC_X86_REG_RAX, &rax));
+
+    TEST_CHECK(rax == 0x44332211);
+
+    OK(uc_close(uc));
+}
+
+static void test_x86_shiftd_rip_relative_imm(const char *code,
+                                             size_t code_size, uint64_t rbx,
+                                             uint16_t expected_value)
+{
+    uc_engine *uc;
+    uint64_t expected_address = code_start + code_size + 0x14f7;
+    uint8_t data[] = {0xaa, 0x11, 0x22, 0x33, 0x44};
+    uint8_t previous;
+    uint16_t mem;
+
+    uc_common_setup(&uc, UC_ARCH_X86, UC_MODE_64, code, code_size);
+    OK(uc_mem_write(uc, expected_address - 1, data, sizeof(data)));
+    OK(uc_reg_write(uc, UC_X86_REG_RBX, &rbx));
+
+    OK(uc_emu_start(uc, code_start, code_start + code_size, 0, 1));
+    OK(uc_mem_read(uc, expected_address - 1, &previous, sizeof(previous)));
+    OK(uc_mem_read(uc, expected_address, &mem, sizeof(mem)));
+
+    TEST_CHECK(previous == 0xaa);
+    TEST_CHECK(mem == expected_value);
+
+    OK(uc_close(uc));
+}
+
+static void test_x86_shld_rip_relative_imm(void)
+{
+    char code[] = "\x66\x0f\xa4\x1d\xf7\x14\x00\x00\x01";
+
+    test_x86_shiftd_rip_relative_imm(code, sizeof(code) - 1, 0x8000, 0x4423);
+}
+
+static void test_x86_shrd_rip_relative_imm(void)
+{
+    char code[] = "\x66\x0f\xac\x1d\xf7\x14\x00\x00\x01";
+
+    test_x86_shiftd_rip_relative_imm(code, sizeof(code) - 1, 1, 0x9108);
+}
+
+static void test_x86_pdep32_zero_extend(void)
+{
+    uc_engine *uc;
+    char code[] = "\xc4\xe2\x63\xf5\xc1"; /* pdep eax, ebx, ecx */
+    uint64_t rax = 0xffffffffffffffffULL;
+    uint64_t rbx = 0xffffffffffffff00ULL;
+    uint64_t rcx = 0xffffffffffffff00ULL;
+
+    uc_common_setup(&uc, UC_ARCH_X86, UC_MODE_64, code, sizeof(code) - 1);
+    OK(uc_reg_write(uc, UC_X86_REG_RAX, &rax));
+    OK(uc_reg_write(uc, UC_X86_REG_RBX, &rbx));
+    OK(uc_reg_write(uc, UC_X86_REG_RCX, &rcx));
+
+    OK(uc_emu_start(uc, code_start, code_start + sizeof(code) - 1, 0, 1));
+    OK(uc_reg_read(uc, UC_X86_REG_RAX, &rax));
+
+    TEST_CHECK(rax == 0x00000000ffff0000ULL);
+
+    OK(uc_close(uc));
+}
+
 static void test_x86_nested_emu_start_cb(uc_engine *uc, uint64_t addr,
                                          size_t size, void *data)
 {
@@ -1153,6 +1344,64 @@ static void test_x86_eflags_reserved_bit(void)
     TEST_CHECK((r_eflags & 2) != 0);
 
     OK(uc_close(uc));
+}
+
+static void test_x86_blsi_cf_case(uint64_t src, uint64_t expected_dst,
+                                  bool expected_cf, bool expected_zf)
+{
+    uc_engine *uc;
+    char code[] = "\xc4\xe2\xf8\xf3\xdb"; /* blsi rax, rbx */
+    uint64_t rax;
+    uint64_t rflags;
+
+    uc_common_setup(&uc, UC_ARCH_X86, UC_MODE_64, code, sizeof(code) - 1);
+    OK(uc_reg_write(uc, UC_X86_REG_RBX, &src));
+
+    OK(uc_emu_start(uc, code_start, code_start + sizeof(code) - 1, 0, 0));
+    OK(uc_reg_read(uc, UC_X86_REG_RAX, &rax));
+    OK(uc_reg_read(uc, UC_X86_REG_RFLAGS, &rflags));
+
+    TEST_CHECK(rax == expected_dst);
+    TEST_CHECK((bool)(rflags & 1) == expected_cf);
+    TEST_CHECK((bool)(rflags & 0x40) == expected_zf);
+
+    OK(uc_close(uc));
+}
+
+static void test_x86_blsi_cf(void)
+{
+    test_x86_blsi_cf_case(1, 1, true, false);
+    test_x86_blsi_cf_case(0, 0, false, true);
+}
+
+static void test_x86_bzhi_index_case(uint64_t index, uint64_t expected_dst,
+                                     bool expected_cf, bool expected_sf)
+{
+    uc_engine *uc;
+    char code[] = "\xc4\xe2\xf0\xf5\xc3"; /* bzhi rax, rbx, rcx */
+    uint64_t rax;
+    uint64_t rflags;
+    uint64_t src = 0xffffffffffffffffULL;
+
+    uc_common_setup(&uc, UC_ARCH_X86, UC_MODE_64, code, sizeof(code) - 1);
+    OK(uc_reg_write(uc, UC_X86_REG_RBX, &src));
+    OK(uc_reg_write(uc, UC_X86_REG_RCX, &index));
+
+    OK(uc_emu_start(uc, code_start, code_start + sizeof(code) - 1, 0, 0));
+    OK(uc_reg_read(uc, UC_X86_REG_RAX, &rax));
+    OK(uc_reg_read(uc, UC_X86_REG_RFLAGS, &rflags));
+
+    TEST_CHECK(rax == expected_dst);
+    TEST_CHECK((bool)(rflags & 1) == expected_cf);
+    TEST_CHECK((bool)(rflags & 0x80) == expected_sf);
+
+    OK(uc_close(uc));
+}
+
+static void test_x86_bzhi_index_boundary(void)
+{
+    test_x86_bzhi_index_case(63, 0x7fffffffffffffffULL, false, false);
+    test_x86_bzhi_index_case(255, 0xffffffffffffffffULL, true, true);
 }
 
 static void test_x86_nested_uc_emu_start_exits_cb(uc_engine *uc, uint64_t addr,
@@ -2230,10 +2479,19 @@ TEST_LIST = {
     {"test_x86_clear_empty_tb", test_x86_clear_empty_tb},
     {"test_x86_hook_tcg_op", test_x86_hook_tcg_op},
     {"test_x86_cmpxchg", test_x86_cmpxchg},
+    {"test_x86_cmpxchg32_accumulator", test_x86_cmpxchg32_accumulator},
+    {"test_x86_cmpxchg32_register", test_x86_cmpxchg32_register},
+    {"test_x86_ret_imm16_unsigned", test_x86_ret_imm16_unsigned},
+    {"test_x86_rorx_rip_relative_imm", test_x86_rorx_rip_relative_imm},
+    {"test_x86_shld_rip_relative_imm", test_x86_shld_rip_relative_imm},
+    {"test_x86_shrd_rip_relative_imm", test_x86_shrd_rip_relative_imm},
+    {"test_x86_pdep32_zero_extend", test_x86_pdep32_zero_extend},
     {"test_x86_nested_emu_start", test_x86_nested_emu_start},
     {"test_x86_nested_emu_stop", test_x86_nested_emu_stop},
     {"test_x86_64_nested_emu_start_error", test_x86_64_nested_emu_start_error},
     {"test_x86_eflags_reserved_bit", test_x86_eflags_reserved_bit},
+    {"test_x86_blsi_cf", test_x86_blsi_cf},
+    {"test_x86_bzhi_index_boundary", test_x86_bzhi_index_boundary},
     {"test_x86_nested_uc_emu_start_exits", test_x86_nested_uc_emu_start_exits},
     {"test_x86_clear_count_cache", test_x86_clear_count_cache},
     {"test_x86_correct_address_in_small_jump_hook",
